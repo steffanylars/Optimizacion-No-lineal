@@ -52,6 +52,61 @@ html, body, [class*="css"] {
     background-image:
         radial-gradient(at 0% 0%, rgba(255,204,0,0.08) 0%, transparent 50%),
         radial-gradient(at 100% 100%, rgba(230,0,18,0.05) 0%, transparent 50%);
+    color: var(--text);
+}
+
+/* FORZAR colores de texto en todos los elementos de Streamlit */
+.stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+    color: var(--text);
+}
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
+    color: var(--text) !important;
+    font-weight: 800;
+}
+.stApp [data-testid="stMarkdownContainer"] p,
+.stApp [data-testid="stMarkdownContainer"] li,
+.stApp [data-testid="stMarkdownContainer"] strong {
+    color: var(--text);
+}
+.stApp [data-testid="stMarkdownContainer"] h1,
+.stApp [data-testid="stMarkdownContainer"] h2,
+.stApp [data-testid="stMarkdownContainer"] h3 {
+    color: var(--text) !important;
+}
+/* Labels de file uploaders */
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploader"] label p,
+[data-testid="stFileUploader"] label span,
+[data-testid="stFileUploader"] small {
+    color: var(--text) !important;
+}
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] div,
+[data-testid="stFileUploaderDropzoneInstructions"] small {
+    color: var(--text-soft) !important;
+}
+/* Radio button labels */
+.stRadio label, .stRadio label p, .stRadio label span {
+    color: var(--text) !important;
+}
+/* Markdown headers fuera y dentro */
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown p {
+    color: var(--text);
+}
+/* Info/banner azul de "Sube los dos archivos" */
+.stAlert, .stAlert p, .stAlert div {
+    color: var(--text) !important;
+}
+/* Expander content */
+[data-testid="stExpander"] p,
+[data-testid="stExpander"] li,
+[data-testid="stExpander"] strong,
+[data-testid="stExpander"] h1,
+[data-testid="stExpander"] h2,
+[data-testid="stExpander"] h3,
+[data-testid="stExpander"] div {
+    color: var(--text) !important;
 }
 
 /* Ocultar header default de Streamlit */
