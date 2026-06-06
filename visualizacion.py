@@ -3,8 +3,7 @@ Renderizado visual del refrigerador OXXO en HTML/CSS.
 El refri se construye como string HTML y se inserta con st.markdown(unsafe_allow_html=True).
 """
 
-ALTURAS = [42.0, 42.0, 31.5, 31.5, 28.0, 25.0]
-NX, NY = 3, 6
+from geometria import NX, NY, ALTURAS, ANCHO_CHAROLA
 
 
 def get_color(desc, familia):
@@ -72,9 +71,17 @@ def sol_to_grid(sol_df):
     grid = {}
     for _, r in sol_df.iterrows():
         key = (int(r['jx']), int(r['jy']))
+        av = r.get('alto')
+        try:
+            av = float(av)
+            if av != av:        # NaN
+                av = None
+        except (TypeError, ValueError):
+            av = None
         grid.setdefault(key, []).append({
             'nombre': str(r.get('desc', r.get('nombre', ''))).strip(),
             'ancho': float(r['ancho']),
+            'alto': av,
             'familia': r['familia'],
             'k': int(r.get('k', 0)),
         })
@@ -83,11 +90,15 @@ def sol_to_grid(sol_df):
     return grid
 
 
-def render_fridge_html(sol_df):
-    """Genera el HTML del refrigerador a escala con todos los detalles."""
+def render_fridge_html(sol_df, ancho_charola=ANCHO_CHAROLA, alturas=ALTURAS):
+    """Genera el HTML del refrigerador a escala con todos los detalles.
+
+    `ancho_charola` (cm) y `alturas` (cm por nivel) definen la escala física, de modo
+    que el dibujo refleja la geometría configurada y el ALTO real de cada producto.
+    """
     grid = sol_to_grid(sol_df)
     SHELF_W = 280
-    ANCHO_SCALE = SHELF_W / 55.0
+    ANCHO_SCALE = SHELF_W / float(ancho_charola)
     PX_PER_CM = 2.5
 
     css = """
@@ -210,19 +221,23 @@ def render_fridge_html(sol_df):
         html += f'<div class="door"><div class="door-label">PUERTA {jx+1}</div>'
 
         for jy in range(NY - 1, -1, -1):
-            shelf_h = ALTURAS[jy] * PX_PER_CM
+            shelf_h = alturas[jy] * PX_PER_CM
             html += f'<div class="shelf" style="width:{SHELF_W}px;height:{shelf_h}px">'
             html += '<div class="shelf-led"></div>'
             if jx == 0:
                 html += f'<div class="nivel-tag">N.{jy+1}</div>'
-                html += f'<div class="altura-tag">{ALTURAS[jy]:.0f}cm</div>'
+                html += f'<div class="altura-tag">{alturas[jy]:.0f}cm</div>'
 
             html += '<div class="products-row">'
             prods = grid.get((jx, jy), [])
             inner_h = shelf_h - 6
             for p in prods:
                 pw = max(10, int(p['ancho'] * ANCHO_SCALE))
-                bh = min(int(inner_h - 6), 110)
+                # Altura de la botella proporcional a su ALTO real (misma escala
+                # vertical que la charola). Si falta el dato, se usa el alto del nivel.
+                alto_cm = p.get('alto') or alturas[jy]
+                bh = int(alto_cm * PX_PER_CM)
+                bh = max(14, min(bh, int(inner_h - 2)))
                 cap_h = int(bh * 0.08)
                 neck_h = int(bh * 0.13)
                 body_h = int(bh * 0.79)

@@ -8,13 +8,79 @@ import numpy as np
 import json
 import sys
 import os
+import tempfile
 
 # Agregar el directorio actual al path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modelos import (correr_pulp, correr_sa, correr_grasp,
-                     cargar_optimo, extraer_referencias)
+                     cargar_optimo, extraer_referencias, ParamsOXXO)
 from visualizacion import render_fridge_html, sol_to_grid
+from geometria import NX, NY, ALTURAS
+import registro
+
+
+# ── CARGA DE DATOS (cacheada por contenido de archivo) ───────────────────────
+@st.cache_data(show_spinner=False)
+def cargar_optimo_cached(opt_bytes):
+    """Lee el óptimo y precomputa referencias. Cacheado por bytes del archivo."""
+    opt_path = os.path.join(tempfile.gettempdir(), '_opt_input.csv')
+    with open(opt_path, 'wb') as f:
+        f.write(opt_bytes)
+    optimo = cargar_optimo(opt_path)
+    refs = extraer_referencias(optimo)
+    return optimo, refs
+
+
+@st.cache_data(show_spinner=False)
+def cargar_hist_filtrado_cached(hist_bytes):
+    """Lee y filtra el histórico al segmento OXXO. Cacheado por bytes del archivo."""
+    hist_path = os.path.join(tempfile.gettempdir(), '_hist_input.csv')
+    with open(hist_path, 'wb') as f:
+        f.write(hist_bytes)
+    # oxxo_1.csv viene en UTF-8 (columna 'TAMAÑO'); utf-8-sig absorbe un posible
+    # BOM. Fallback a latin-1 si algún histórico llegara en esa codificación.
+    try:
+        hist = pd.read_csv(hist_path, encoding='utf-8-sig')
+    except UnicodeDecodeError:
+        hist = pd.read_csv(hist_path, encoding='latin-1')
+    if 'DIRECCION_LEGO_ID' in hist.columns:
+        hist['DIRECCION_LEGO_ID'] = hist['DIRECCION_LEGO_ID'].str.strip()
+    return hist[
+        (hist['PLANOGRUPO'] == 'Refrescos') &
+        (hist['MUEBLE_ID'] == 'CF') &
+        (hist['DIRECCION_LEGO_ID'] == 'DI') &
+        (hist['TAMAÑO'] == 3.0)
+    ].copy()
+
+
+# ── TABLA DE REGISTROS (persistente entre sesiones) ──────────────────────────
+def render_registros():
+    """Muestra la tabla acumulada de soluciones (JSON persistente) + descargas."""
+    df = registro.tabla_como_df()
+    archivo = os.path.basename(registro.RUTA_JSON)
+    st.markdown("### Tabla de soluciones (persistente)")
+    if df.empty:
+        st.info(f"Aún no hay registros. Corre los modelos para empezar a acumular la "
+                f"tabla; se guarda en `{archivo}` en el directorio del proyecto.")
+        return
+    st.markdown(
+        f"<div style='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--muted);"
+        f"margin-bottom:8px;'>{len(df)} registros &middot; {df['id_solucion'].nunique()} "
+        f"corridas &middot; archivo: <strong>{archivo}</strong></div>",
+        unsafe_allow_html=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "Descargar CSV", df.to_csv(index=False).encode('utf-8'),
+            file_name="soluciones.csv", mime="text/csv", use_container_width=True)
+    with c2:
+        st.download_button(
+            "Descargar JSON",
+            json.dumps(registro.cargar_tabla(), ensure_ascii=False, indent=2).encode('utf-8'),
+            file_name="soluciones.json", mime="application/json", use_container_width=True)
+
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -392,6 +458,8 @@ if 'resultados' not in st.session_state:
     st.session_state.resultados = None
     st.session_state.optimo_df = None
     st.session_state.refs = None
+    st.session_state.params = None
+    st.session_state.id_solucion = None
 
 
 # ── SIDEBAR PARA UPLOAD ─────────────────────────────────────────────────────
@@ -417,6 +485,44 @@ with col_up2:
         label_visibility='collapsed',
     )
 
+# ── PARÁMETROS CONFIGURABLES ────────────────────────────────────────────────
+with st.expander("Parámetros avanzados (opcional)", expanded=False):
+    st.markdown("Ajusta el modelo. **Los valores por defecto reproducen el "
+                "comportamiento estándar** — no hace falta tocar nada.")
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        st.markdown("**Geometría y demanda**")
+        p_K = st.slider("Frentes por charola (K)", 4, 12, 8,
+                        help="Espacios/frentes que caben en cada charola.")
+        p_ancho = st.slider("Ancho de charola (cm)", 40, 70, 55,
+                            help="Ancho útil por charola; lo usan los 3 solvers y el dibujo.")
+        cap = NX * NY * p_K                # capacidad con la K actual
+        cap_max = NX * NY * 12             # rango fijo (K máx = 12) para evitar
+        p_demanda = st.slider(             # que el slider rompa al cambiar K
+            "Demanda global (frentes totales)", 18, cap_max, min(cap, cap_max),
+            help=f"Total de frentes a colocar en el refri. Capacidad actual "
+                 f"({NX*NY} charolas × K) = {cap}; por encima de eso no limita.")
+    with pc2:
+        st.markdown("**PuLP (exacto) y objetivo**")
+        p_top_n = st.slider("Productos considerados (top-N)", 10, 80, 45)
+        p_time = st.slider("Tiempo límite CBC (s)", 10, 180, 60)
+        p_eps = st.slider("Máx. charolas híbridas (ε)", 0, 18, 11)
+        p_delta = st.number_input("δ sinergia (fitness)", 0.0, 1.0, 0.005,
+                                  step=0.005, format="%.3f")
+    with pc3:
+        st.markdown("**Metaheurísticas (SA / GRASP)**")
+        p_sa_iter = st.slider("SA: iteraciones por temperatura", 100, 2000, 600, step=100)
+        p_grasp_n = st.slider("GRASP: multi-arranques", 3, 30, 10)
+        p_grasp_ls = st.slider("GRASP: iteraciones búsqueda local", 500, 8000, 3000, step=500)
+        p_seed = st.number_input("Semilla aleatoria", 0, 99999, 42, step=1)
+
+params = ParamsOXXO(
+    K=p_K, ancho_charola=float(p_ancho), demanda_global=int(p_demanda),
+    pulp_top_n=p_top_n, pulp_time_limit=p_time,
+    sa_iter_por_T=p_sa_iter, grasp_n_iter=p_grasp_n, grasp_ls_iter=p_grasp_ls,
+    seed=int(p_seed), epsilon=p_eps, delta=float(p_delta),
+)
+
 # Botón para correr modelos
 correr = st.button("CORRER LOS 3 MODELOS", type="primary",
                     use_container_width=True,
@@ -426,35 +532,18 @@ correr = st.button("CORRER LOS 3 MODELOS", type="primary",
 # ── EJECUTAR MODELOS ─────────────────────────────────────────────────────────
 if correr and hist_file and opt_file:
     with st.spinner("Cargando óptimo OXXO..."):
-        # Guardar archivos temporales
-        hist_path = '/tmp/_hist_input.csv'
-        opt_path = '/tmp/_opt_input.csv'
-        with open(hist_path, 'wb') as f:
-            f.write(hist_file.getbuffer())
-        with open(opt_path, 'wb') as f:
-            f.write(opt_file.getbuffer())
-
-        # Cargar óptimo
+        # Cargar óptimo (cacheado por contenido del archivo)
         try:
-            optimo = cargar_optimo(opt_path)
-            refs = extraer_referencias(optimo)
+            optimo, refs = cargar_optimo_cached(opt_file.getvalue())
             st.session_state.optimo_df = optimo
             st.session_state.refs = refs
         except Exception as e:
             st.error(f"Error al cargar óptimo: {e}")
             st.stop()
 
-        # Cargar histórico
+        # Cargar histórico filtrado (cacheado por contenido del archivo)
         try:
-            hist = pd.read_csv(hist_path)
-            if 'DIRECCION_LEGO_ID' in hist.columns:
-                hist['DIRECCION_LEGO_ID'] = hist['DIRECCION_LEGO_ID'].str.strip()
-            hist_filt = hist[
-                (hist['PLANOGRUPO'] == 'Refrescos') &
-                (hist['MUEBLE_ID'] == 'CF') &
-                (hist['DIRECCION_LEGO_ID'] == 'DI') &
-                (hist['TAMAÑO'] == 3.0)
-            ].copy()
+            hist_filt = cargar_hist_filtrado_cached(hist_file.getvalue())
         except Exception as e:
             st.error(f"Error al cargar histórico: {e}")
             st.stop()
@@ -463,28 +552,40 @@ if correr and hist_file and opt_file:
 
     # PuLP
     with st.spinner("Corriendo PuLP MIQP (modelo exacto)..."):
-        sol_p, m_p = correr_pulp(optimo, refs)
+        sol_p, m_p = correr_pulp(hist_filt, optimo, refs, params)
         resultados['pulp'] = {'sol': sol_p, 'metrics': m_p}
 
     # SA
     with st.spinner("Corriendo Simulated Annealing..."):
-        sol_s, m_s = correr_sa(hist_filt, optimo, refs)
+        sol_s, m_s = correr_sa(hist_filt, optimo, refs, params)
         resultados['sa'] = {'sol': sol_s, 'metrics': m_s}
 
     # GRASP
     with st.spinner("Corriendo GRASP + Local Search..."):
-        sol_g, m_g = correr_grasp(hist_filt, optimo, refs)
+        sol_g, m_g = correr_grasp(hist_filt, optimo, refs, params)
         resultados['grasp'] = {'sol': sol_g, 'metrics': m_g}
 
     st.session_state.resultados = resultados
+    st.session_state.params = params
 
-    st.markdown("""
+    # Persistir la corrida en la tabla de salida (JSON en el directorio).
+    try:
+        id_sol, _, _ = registro.registrar_corrida(resultados)
+        st.session_state.id_solucion = id_sol
+        id_txt = (f"Registrado como <strong>{id_sol}</strong> en "
+                  f"<code>{os.path.basename(registro.RUTA_JSON)}</code> &middot; ")
+    except Exception as e:
+        st.session_state.id_solucion = None
+        id_txt = ""
+        st.warning(f"No se pudo guardar el registro persistente: {e}")
+
+    st.markdown(f"""
     <div class="status-banner success">
         <div style="font-weight:800;color:#2E7D32;font-size:14px;letter-spacing:0.05em;">
             MODELOS EJECUTADOS CORRECTAMENTE
         </div>
         <div style="font-size:13px;color:var(--text-soft);margin-top:4px;">
-            Los 3 modelos terminaron. Selecciona una pestaña para ver los resultados.
+            {id_txt}Los 3 modelos terminaron. Selecciona una pestaña para ver los resultados.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -493,43 +594,50 @@ if correr and hist_file and opt_file:
 # ── MOSTRAR RESULTADOS ──────────────────────────────────────────────────────
 if st.session_state.resultados is None:
     st.info("Sube los dos archivos y presiona el botón para correr los modelos.")
+    niveles_txt = ' · '.join(f'N.{i+1}={ALTURAS[i]:g}cm' for i in range(NY))
     with st.expander("Cómo funciona el modelo (click para abrir)", expanded=False):
-        st.markdown("""
+        st.markdown(f"""
         ### Objetivo
-        Asignar productos a las 18 charolas (3 puertas × 6 niveles) del refrigerador OXXO de forma que la solución
-        **se parezca al óptimo aprobado por OXXO** (archivo `ejemplo_planograma.csv`, plan "opt_x_lego" con segmentos BCO, CLA, HRN).
+        Asignar productos a las {NX*NY} charolas ({NX} puertas × {NY} niveles) del refrigerador OXXO de forma que la
+        solución **se parezca al óptimo aprobado por OXXO** (`ejemplo_planograma.csv`, plan "opt_x_lego" con segmentos BCO, CLA, HRN).
 
         ### Geometría real
-        - **3 puertas** de 55 cm de ancho.
-        - **6 niveles** con alturas irregulares: N.1 y N.2 = 42cm (caben 1.5L/2L), N.3 y N.4 = 31.5cm, N.5 = 28cm, N.6 = 25cm.
+        - **{NX} puertas** de **{params.ancho_charola:.0f} cm** de ancho útil, con **{params.K} frentes** por charola.
+        - **{NY} niveles** con alturas irregulares (cm disponibles): {niveles_txt}.
+        - **Demanda global:** hasta **{params.demanda()} frentes** en todo el refri (configurable).
 
         ### Función objetivo
         Para cada producto i y posición (jx, jy), `F[i,jx,jy]` = veces que ese producto aparece en esa posición en el óptimo OXXO.
 
+        - **PuLP (exacto, lineal):** maximiza la coincidencia con el óptimo.
         ```
-        max Σ F[i,jx,jy] · X[i,jx,jy,k]  +  δ · Σ G[i1,i2] · X[i1] · X[i2]
+        max Σ F[i,jx,jy] · n[i,jx,jy]   s.a.   Σ n ≤ D (demanda) · ancho · alto · ≤ K por charola
         ```
+        - **Metaheurísticas (SA / GRASP):** optimizan un *score de similitud* al óptimo
+          (en_casa·5 + familia·2 + jaccard·100). La factibilidad reportada usa el fitness
+          penalizado R1–R13, donde sí entra la sinergia `δ·G` (δ = {params.delta:g}).
 
         ### Tres métodos
-        - **PuLP MIQP:** Optimización exacta con solver CBC.
-        - **Simulated Annealing:** Metaheurística que parte de un planograma óptimo OXXO y hace mejoras locales.
-        - **GRASP + LS:** Construcción greedy aleatorizada con búsqueda local.
+        - **PuLP:** optimización exacta con solver CBC (lineal, sin sinergia).
+        - **Simulated Annealing:** parte de un *cocktail* del óptimo OXXO y hace mejoras locales.
+        - **GRASP + LS:** construcción greedy aleatorizada con búsqueda local.
 
         ### Restricciones
         """)
         restrictions = [
-            ('R1 · Ancho', 'Suma de anchos por charola ≤ 55 cm.'),
+            ('R1 · Ancho', f'Suma de anchos por charola ≤ {params.ancho_charola:.0f} cm (igual en PuLP, SA y GRASP).'),
             ('R2 · Alto', 'Alto del producto ≤ altura disponible del nivel. Por eso los grandes van abajo.'),
-            ('R3 · Cobertura', 'Cada producto se coloca al menos 1 vez.'),
-            ('R4 · Unicidad', 'Cada slot contiene a lo más 1 producto.'),
+            ('R3 · Cobertura', f'Cada producto del top-{params.pulp_top_n} se coloca entre 1 y 7 frentes; el total del refri ≤ demanda D = {params.demanda()}.'),
+            ('R4 · Capacidad', f'A lo más K = {params.K} frentes por charola (variables enteras n ∈ {{0..{params.K}}}, no binarias).'),
             ('R5-R8 · Familia y hibridismo', 'Detección de charolas que mezclan familias.'),
-            ('R9 · Máximo híbridas', 'ε = 11 (calibrado al óptimo OXXO real).'),
+            ('R9 · Máximo híbridas', f'ε = {params.epsilon} (máx. charolas híbridas; sólo afecta el fitness de factibilidad).'),
             ('R10-R12 · Agrupación por columna (suave)', 'P1=cola, P2=cola, P3=sabor (del óptimo real).'),
-            ('R13 · Binariedad', 'Variables binarias 0/1.'),
         ]
         for name, desc in restrictions:
             st.markdown(f'<div class="restriction-card"><div class="r-name">{name}</div><div class="r-desc">{desc}</div></div>',
                         unsafe_allow_html=True)
+    with st.expander("Registros guardados (histórico de corridas)", expanded=False):
+        render_registros()
     st.stop()
 
 # Si hay resultados, mostrar pestañas
@@ -545,7 +653,7 @@ MODEL_NAMES = {
 }
 
 # ── PESTAÑAS ────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["PLANOGRAMA", "COINCIDENCIA", "EFECTIVIDAD"])
+tab1, tab2, tab3, tab4 = st.tabs(["PLANOGRAMA", "COINCIDENCIA", "EFECTIVIDAD", "REGISTROS"])
 
 
 # ─── TAB 1: PLANOGRAMA ─────────────────────────────────────────────────────
@@ -574,6 +682,7 @@ with tab1:
                         'desc': r['ITEM_DESC'].strip(),
                         'jx': jx, 'jy': jy, 'k': k,
                         'ancho': r['ANCHO'],
+                        'alto': r['ALTO'],
                         'familia': r['familia'],
                         'F': r['NUM_FRENTES'],
                     })
@@ -613,8 +722,10 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-    # Refrigerador
-    st.markdown(render_fridge_html(sol_df_sel), unsafe_allow_html=True)
+    # Refrigerador (escala con el ancho de charola usado en la corrida)
+    params_run = st.session_state.params or ParamsOXXO()
+    st.markdown(render_fridge_html(sol_df_sel, ancho_charola=params_run.ancho_charola,
+                                   alturas=ALTURAS), unsafe_allow_html=True)
 
 
 # ─── TAB 2: COINCIDENCIA ───────────────────────────────────────────────────
@@ -821,3 +932,13 @@ with tab3:
         </li>"""
     top_html += '</ul></div>'
     st.markdown(top_html, unsafe_allow_html=True)
+
+
+# ─── TAB 4: REGISTROS ──────────────────────────────────────────────────────
+with tab4:
+    if st.session_state.id_solucion:
+        st.markdown(
+            f"<div style='font-size:13px;color:var(--text-soft);margin:4px 0 8px;'>"
+            f"Última corrida guardada: <strong>{st.session_state.id_solucion}</strong></div>",
+            unsafe_allow_html=True)
+    render_registros()

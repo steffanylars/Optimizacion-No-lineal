@@ -1,0 +1,29 @@
+[
+  {
+    "id_solucion": "SOL-0001",
+    "modelo": "PuLP MIQP",
+    "charolas": 18,
+    "frentes": 129,
+    "niveles": 6,
+    "desviacion_no_lineal": -1049935.0,
+    "timestamp": "2026-06-05T18:30:12"
+  },
+  {
+    "id_solucion": "SOL-0001",
+    "modelo": "Simulated Annealing",
+    "charolas": 18,
+    "frentes": 144,
+    "niveles": 6,
+    "desviacion_no_lineal": -38149936.51,
+    "timestamp": "2026-06-05T18:30:12"
+  },
+  {
+    "id_solucion": "SOL-0001",
+    "modelo": "GRASP + LS",
+    "charolas": 18,
+    "frentes": 101,
+    "niveles": 6,
+    "desviacion_no_lineal": -1649950.35,
+    "timestamp": "2026-06-05T18:30:12"
+  }
+]
